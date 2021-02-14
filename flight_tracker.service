@@ -1,0 +1,15 @@
+[Unit]
+Description=Flight Tracker Service
+After=multi-user.target dump1090-fa.service
+
+[Service]
+Type=simple
+WorkingDirectory=/usr/share/flight_tracker
+ExecStartPre=/bin/sleep 2
+ExecStart=/usr/bin/flight_tracker
+Restart=on-failure
+StandardOutput=syslog+console
+StandardError=syslog+console
+
+[Install]
+WantedBy=multi-user.target
