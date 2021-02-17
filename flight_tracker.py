@@ -5,12 +5,17 @@ import time
 import json
 import math
 import os
-
+import colorsys
+import numpy
 from PIL import Image, ImageDraw, ImageFont
-import ST7789 as ST7789
+from collections import namedtuple
 
+import busio
+import digitalio
+from board import SCK, MOSI, MISO, CE1, D25
+import adafruit_rgb_display.st7789 as st7789
 
-FPS = 10
+FPS = 30
 
 class Size:
     def __init__(self, width, height):
@@ -24,16 +29,25 @@ class Frame:
         self.y = y
         self.size = size
 
+# Configuration for CS and DC pins:
+CS_PIN = CE1
+DC_PIN = D25
+BAUDRATE = 24000000
+
+# Setup SPI bus using hardware SPI:
+SPI = busio.SPI(clock=SCK, MOSI=MOSI, MISO=MISO)
 
 class Screen:
-    Disp = ST7789.ST7789(
-        port=0,
-        cs=ST7789.BG_SPI_CS_FRONT,
-        dc=9,
-        backlight=19,
-        rotation=270,
-        spi_speed_hz=80 * 1000 * 1000
-    )
+    # Create the ST7789 display:
+    Disp = st7789.ST7789(
+        SPI,
+        rotation=0,
+        width=240,
+        height=240,
+        y_offset=80,
+        baudrate=BAUDRATE,
+        cs=digitalio.DigitalInOut(CS_PIN),
+        dc=digitalio.DigitalInOut(DC_PIN))
     currentVC = None
 
     @staticmethod
@@ -43,7 +57,6 @@ class Screen:
     @staticmethod
     def setup():
         print("Setup Screen")
-        Screen.Disp.begin()
         Screen.runloop()
 
     @staticmethod
@@ -53,7 +66,7 @@ class Screen:
             if Screen.currentVC is not None:
                 framebuffer = Screen.currentVC.redraw()
                 framebuffer = framebuffer.resize((Screen.size().width, Screen.size().height))
-                Screen.Disp.display(framebuffer.convert("RGBA"))
+                Screen.Disp.image(framebuffer.convert("RGBA"))
             time.sleep(1.0 / FPS)
 
     @staticmethod
@@ -116,14 +129,38 @@ class ErrorView(View):
         return self.textimage
 
 
+class AltitudeView(View):
+    def __init__(self):
+        super().__init__(Frame(0, 240-10, Size(240, 10)))
+        # Create a new image with transparent background to store the text.
+        self.bgImage = Image.new('RGB', (240, 20), (255, 0, 0, 255))
+        pix = numpy.array(self.bgImage)
+        bucket = 330 / 240
+        for line_idx in range(len(pix)):
+            for pix_idx in range(len(pix[line_idx])):
+                hue = pix_idx * bucket
+                rgb = colorsys.hsv_to_rgb(hue / 360, 1, 1)
+                pixel = (int(rgb[0]*255), int(rgb[1]*255), int(rgb[2]*255))
+                self.bgImage.putpixel((pix_idx, line_idx), pixel)
+
+    def render(self):
+        return self.bgImage
+
+
 class AirplaneView(View):
     def __init__(self, x, y, plane):
-        self.size = Size(40, 40)
+        self.size = Size(30, 30)
         fx, fy = self.fixOrigin(x, y)
         super().__init__(Frame(fx, fy, self.size))
-        self.image = Image.open("resources/plane.png").rotate(45)
-        self.image = self.image.rotate(-1 * plane.getHeading())
-        self.image = self.image.resize((self.frame.size.width, self.frame.size.height))
+        planeImg = Image.open("resources/plane.png").rotate(45)
+        planeImg = planeImg.rotate(-1 * plane.getHeading())
+        planeImg = planeImg.resize((self.frame.size.width, self.frame.size.height))
+
+        planeAlpha = planeImg.getchannel('A')
+        iconColor = Alt2Color.interpolate2color(plane.alt_baro)
+        self.image = Image.new('RGBA', planeImg.size, iconColor)
+        self.image.putalpha(planeAlpha)
+
 
     def fixOrigin(self, x, y):
         return (int(x-self.size.width/2), int(y-self.size.height/2))
@@ -141,6 +178,8 @@ class Airplane:
         self.track = JSON.get("track", None)
         self.mag_heading = JSON.get("mag_heading", None)
         self.nav_heading = JSON.get("nav_heading", None)
+        self.alt_baro = JSON.get("alt_baro", None)
+        self.flight = JSON.get("flight", None)        
         
     def getHeading(self):
         if self.track is not None:
@@ -156,6 +195,35 @@ class Airplane:
             return False
         else:
             return True
+
+Alt2Color = namedtuple('Alt2Color', 'alt val')
+
+
+class Alt2Color:
+    Saturation = 100
+    Lightness = 50
+    HUE = [
+        Alt2Color(2000, 20),
+        Alt2Color(10000, 140),
+        Alt2Color(40000, 300),
+        ]
+
+    def interpolate2color(alt):
+        hue = Alt2Color.HUE[0].val
+        for i in range(len(Alt2Color.HUE)-1, -1, -1):
+            if alt > Alt2Color.HUE[i].alt:
+                if i == len(Alt2Color.HUE)-1:
+                    hue = Alt2Color.HUE[i].val
+                else:
+                    hue = Alt2Color.HUE[i].val + (Alt2Color.HUE[i+1].val - Alt2Color.HUE[i].val) * (alt - Alt2Color.HUE[i].alt) / (Alt2Color.HUE[i+1].alt - Alt2Color.HUE[i].alt)
+                break
+        if hue < 0:
+            hue = (hue % 360) + 360
+        elif hue >= 360:
+            hue = hue % 360
+        rgb = colorsys.hsv_to_rgb(hue / 360, Alt2Color.Saturation/100, Alt2Color.Lightness/100)
+        return (int(rgb[0]*255), int(rgb[1]*255), int(rgb[2]*255))
+
 
 class CoordinatesConverter:
     EARTH_RADIUS_KM = 6371
@@ -199,11 +267,16 @@ class MainViewController(ViewController):
             p0_lat=51.748699, 
             p0_lon=-0.531184, 
             p1_lat=51.229317, 
-            p1_lon=0.300493)
+            p1_lon=0.300493
+        )
 
         self.errorView = ErrorView()
         self.mapView = MapView()
         self.addView(self.mapView)
+
+        self.altView = AltitudeView()
+        self.addView(self.altView)
+
         self.airplanes = []
         self.airplaneViews = []
 

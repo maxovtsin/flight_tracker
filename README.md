@@ -5,8 +5,12 @@ nearby aircrafts.
 
 Then shows local map and aircrafts on connected ST7789 screen in real-time.
 
+Install dependencies:
+`sudo pip3 install adafruit-circuitpython-rgb-display`
+
 To install as a linux service:
 `sudo ./install.sh`
 
 https://github.com/flightaware/dump1090
-https://github.com/pimoroni/st7789-python 
+
+https://github.com/adafruit/Adafruit_CircuitPython_RGB_Display
